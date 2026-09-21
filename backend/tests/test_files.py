@@ -96,7 +96,7 @@ def test_create_share_success(client, auth_token):
     assert result['success'] is True
     assert 'share_id' in result
     assert result['max_downloads'] == 5
-    assert result['filename'] == 'test_share.txt'
+    assert result['name'] == 'test_share.txt'
 
 
 def test_create_share_default_values(client, auth_token):
@@ -133,9 +133,12 @@ def test_get_share_info(client, auth_token):
     assert response.status_code == 200
     result = response.get_json()
     assert result['share_id'] == share_id
-    assert result['filename'] == 'test_get.txt'
+    assert result['name'] == 'test_get.txt'
+    assert result['size'] > 0
     assert result['is_valid'] is True
+    assert result['error_msg'] is None
     assert result['download_count'] == 0
+    assert result['created_by'] == 'admin'
 
 
 def test_get_nonexistent_share(client):
@@ -255,8 +258,54 @@ def test_list_shares(client, auth_token):
     assert response.status_code == 200
     shares = response.get_json()
     assert len(shares) >= 2
-    assert 'filename' in shares[0]
-    assert 'is_valid' in shares[0]
+    # 列表与详情使用同一份字段契约
+    expected_keys = {
+        'share_id', 'file_id', 'name', 'size', 'created_by',
+        'expires_at', 'max_downloads', 'download_count',
+        'created_at', 'uploaded_at', 'is_valid', 'error_msg'
+    }
+    item = next(s for s in shares if s['name'].startswith('test_list_'))
+    assert expected_keys.issubset(item.keys())
+    assert 'filename' not in item
+    assert 'filesize' not in item
+
+
+def test_list_files_unified_shape(client):
+    """文件列表返回统一字段，并包含上传时间"""
+    data = {'file': (io.BytesIO(b'shape test'), 'test_shape.txt')}
+    client.post('/api/upload', data=data, content_type='multipart/form-data')
+
+    response = client.get('/api/files')
+    files = response.get_json()
+    file_item = next(f for f in files if f['name'] == 'test_shape.txt')
+    assert set(file_item.keys()) == {'id', 'name', 'size', 'uploaded_at'}
+    assert file_item['size'] == len(b'shape test')
+    assert file_item['uploaded_at']
+
+
+def test_share_detail_matches_list_shape(client, auth_token):
+    """分享详情与分享列表序列化结果一致"""
+    data = {'file': (io.BytesIO(b'consistent'), 'test_consistent.txt')}
+    upload_resp = client.post('/api/upload', data=data, content_type='multipart/form-data')
+    file_id = upload_resp.get_json()['file_id']
+
+    create_resp = client.post(
+        '/api/share',
+        json={'file_id': file_id, 'expire_hours': 24, 'max_downloads': 5},
+        headers={'Authorization': f'Bearer {auth_token}'}
+    )
+    share_id = create_resp.get_json()['share_id']
+
+    detail = client.get(f'/api/share/{share_id}').get_json()
+    listed = client.get(
+        '/api/shares',
+        headers={'Authorization': f'Bearer {auth_token}'}
+    ).get_json()
+    listed_item = next(s for s in listed if s['share_id'] == share_id)
+
+    for key in ('name', 'size', 'created_by', 'max_downloads', 'download_count', 'is_valid'):
+        assert detail[key] == listed_item[key]
+    assert detail['name'] == 'test_consistent.txt'
 
 
 def test_list_shares_without_auth(client):

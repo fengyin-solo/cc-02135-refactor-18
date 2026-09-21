@@ -72,8 +72,8 @@ def upload_file():
 def list_files():
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT id, name, path, size FROM files')
-    files = [dict(row) for row in cursor.fetchall()]
+    cursor.execute('SELECT id, name, path, size, uploaded_at FROM files')
+    files = [serialize_file(row) for row in cursor.fetchall()]
     conn.close()
     return jsonify(files)
 
@@ -114,13 +114,65 @@ def generate_short_id():
     return uuid.uuid4().hex[:12]
 
 
+def _row_get(row, key, default=None):
+    """兼容 sqlite3.Row / dict / 缺列的取值方式（旧库、缺字段记录）"""
+    if row is None:
+        return default
+    try:
+        value = row[key]
+    except (IndexError, KeyError):
+        return default
+    return value if value is not None else default
+
+
+def serialize_file(row):
+    """文件对象的统一数据整形：列表、详情、分享内嵌文件信息共用同一份结果。
+
+    旧数据 / 缺字段记录统一在这里补空值，入口层不再各自挑字段、改名字。
+    """
+    return {
+        'id': _row_get(row, 'id', ''),
+        'name': _row_get(row, 'name', '未知文件'),
+        'size': _row_get(row, 'size', 0),
+        'uploaded_at': _row_get(row, 'uploaded_at'),
+    }
+
+
+def serialize_share(row, is_valid=None, error_msg=None):
+    """分享对象的统一数据整形：分享列表、分享详情、分享预览共用同一份结果。
+
+    名称、大小、时间、状态一律在此处规整，缺失字段使用安全默认值。
+    """
+    if is_valid is None or error_msg is None:
+        computed_valid, computed_error = is_share_valid(row)
+        if is_valid is None:
+            is_valid = computed_valid
+        if error_msg is None:
+            error_msg = computed_error
+
+    return {
+        'share_id': _row_get(row, 'id', ''),
+        'file_id': _row_get(row, 'file_id', ''),
+        'name': _row_get(row, 'filename', '未知文件'),
+        'size': _row_get(row, 'filesize', 0),
+        'created_by': _row_get(row, 'created_by', '未知用户'),
+        'expires_at': _row_get(row, 'expires_at'),
+        'max_downloads': _row_get(row, 'max_downloads'),  # 缺省按无限制处理
+        'download_count': _row_get(row, 'download_count', 0),
+        'created_at': _row_get(row, 'created_at'),
+        'uploaded_at': _row_get(row, 'uploaded_at'),
+        'is_valid': is_valid,
+        'error_msg': error_msg,
+    }
+
+
 def get_share_link_info(share_id):
     """获取分享链接信息，包含文件信息和有效性检查"""
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
         SELECT s.id, s.file_id, s.created_by, s.expires_at, s.max_downloads, s.download_count, s.created_at,
-               f.name as filename, f.size as filesize
+               f.name as filename, f.size as filesize, f.uploaded_at
         FROM share_links s
         JOIN files f ON s.file_id = f.id
         WHERE s.id = ?
@@ -135,10 +187,13 @@ def is_share_valid(share):
     if not share:
         return False, '分享链接不存在'
 
-    if share['expires_at'] is not None and share['expires_at'] < time.time():
+    expires_at = _row_get(share, 'expires_at')
+    if expires_at is not None and expires_at < time.time():
         return False, '分享链接已过期'
 
-    if share['max_downloads'] is not None and share['download_count'] >= share['max_downloads']:
+    max_downloads = _row_get(share, 'max_downloads')
+    download_count = _row_get(share, 'download_count', 0)
+    if max_downloads is not None and download_count >= max_downloads:
         return False, '分享链接下载次数已用完'
 
     return True, None
@@ -220,38 +275,27 @@ def create_share():
 
     logger.info(f"分享链接创建成功: 文件 {file_info['name']}, 分享ID {share_id}, 创建者 {username}")
 
-    return jsonify({
-        'success': True,
-        'share_id': share_id,
+    share_data = serialize_share({
+        'id': share_id,
+        'file_id': file_id,
+        'filename': file_info['name'],
+        'created_by': username,
         'expires_at': expires_at,
         'max_downloads': max_downloads,
-        'filename': file_info['name']
-    })
+    }, is_valid=True, error_msg=None)
+    share_data['success'] = True
+    return jsonify(share_data)
 
 
 @files_bp.route('/api/share/<share_id>', methods=['GET'])
 def get_share(share_id):
     """获取分享链接信息（公开访问）"""
     share = get_share_link_info(share_id)
-    valid, error_msg = is_share_valid(share)
 
     if not share:
         return jsonify({'error': '分享链接不存在'}), 404
 
-    share_data = {
-        'share_id': share['id'],
-        'filename': share['filename'],
-        'filesize': share['filesize'],
-        'created_by': share['created_by'],
-        'expires_at': share['expires_at'],
-        'max_downloads': share['max_downloads'],
-        'download_count': share['download_count'],
-        'created_at': share['created_at'],
-        'is_valid': valid,
-        'error_msg': error_msg
-    }
-
-    return jsonify(share_data)
+    return jsonify(serialize_share(share))
 
 
 @files_bp.route('/api/share/<share_id>/download', methods=['GET'])
@@ -295,7 +339,7 @@ def list_shares():
     cursor = conn.cursor()
     cursor.execute('''
         SELECT s.id, s.file_id, s.created_by, s.expires_at, s.max_downloads, s.download_count, s.created_at,
-               f.name as filename, f.size as filesize
+               f.name as filename, f.size as filesize, f.uploaded_at
         FROM share_links s
         JOIN files f ON s.file_id = f.id
         WHERE s.created_by = ?
@@ -304,21 +348,7 @@ def list_shares():
     shares = cursor.fetchall()
     conn.close()
 
-    result = []
-    for share in shares:
-        valid, error_msg = is_share_valid(share)
-        result.append({
-            'share_id': share['id'],
-            'file_id': share['file_id'],
-            'filename': share['filename'],
-            'filesize': share['filesize'],
-            'expires_at': share['expires_at'],
-            'max_downloads': share['max_downloads'],
-            'download_count': share['download_count'],
-            'created_at': share['created_at'],
-            'is_valid': valid,
-            'error_msg': error_msg
-        })
+    result = [serialize_share(share) for share in shares]
 
     return jsonify(result)
 
