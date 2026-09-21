@@ -67,6 +67,7 @@
     </div>
 
     <script src="config.js"></script>
+    <script src="common.js"></script>
     <script>
         const API_BASE = CONFIG.API_BASE;
         let currentShareId = null;
@@ -83,53 +84,11 @@
             document.getElementById('loadingOverlay').classList.remove('active');
         }
 
-        // HTML转义防止XSS
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        // 获取文件图标
-        function getFileIcon(filename) {
-            const ext = filename.split('.').pop().toLowerCase();
-            const icons = {
-                pdf: '📄', doc: '📝', docx: '📝', txt: '📃',
-                jpg: '🖼️', jpeg: '🖼️', png: '🖼️', gif: '🖼️',
-                mp3: '🎵', wav: '🎵', mp4: '🎬', avi: '🎬',
-                zip: '📦', rar: '📦', '7z': '📦',
-                js: '💻', py: '🐍', html: '🌐', css: '🎨'
-            };
-            return icons[ext] || '📁';
-        }
-
-        // 格式化文件大小
-        function formatSize(bytes) {
-            if (bytes === 0) return '0 B';
-            const k = 1024;
-            const sizes = ['B', 'KB', 'MB', 'GB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-        }
-
-        // 格式化时间戳
-        function formatTimestamp(timestamp) {
-            if (!timestamp) return '永久有效';
-            const date = new Date(timestamp * 1000);
-            return date.toLocaleString('zh-CN', {
-                year: 'numeric',
-                month: '2-digit',
-                day: '2-digit',
-                hour: '2-digit',
-                minute: '2-digit'
-            });
-        }
-
         // 获取分享链接信息
         async function loadShareInfo() {
             // 从 URL hash 获取 share_id
             currentShareId = window.location.hash.substring(1);
-            
+
             if (!currentShareId) {
                 showError('无效链接', '请检查您的分享链接是否完整');
                 return;
@@ -137,7 +96,7 @@
 
             try {
                 const response = await fetch(`${API_BASE}/share/${currentShareId}`);
-                shareInfo = await response.json();
+                shareInfo = normalizeShare(await response.json());
 
                 if (!response.ok) {
                     showError('链接不存在', '该分享链接不存在');

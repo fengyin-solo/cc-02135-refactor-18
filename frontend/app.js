@@ -154,11 +154,11 @@ uploadZone.addEventListener('drop', async (e) => {
 // 加载文件列表
 async function loadFileList() {
     showLoading('加载文件列表...');
-    
+
     try {
         const response = await fetch(`${API_BASE}/files`);
-        const files = await response.json();
-        
+        const files = (await response.json()).map(normalizeFile);
+
         const fileList = document.getElementById('fileList');
         const isLoggedIn = TokenManager.get() && (await TokenManager.isValid());
         
@@ -189,13 +189,6 @@ async function loadFileList() {
     } finally {
         hideLoading();
     }
-}
-
-// HTML转义防止XSS
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
 }
 
 // 请求下载 - 检查token是否有效，有效则直接下载
@@ -347,60 +340,6 @@ function hideLoading() {
     document.getElementById('loadingOverlay').classList.remove('active');
 }
 
-// 获取文件图标
-function getFileIcon(filename) {
-    const ext = filename.split('.').pop().toLowerCase();
-    const icons = {
-        pdf: '📄', doc: '📝', docx: '📝', txt: '📃',
-        jpg: '🖼️', jpeg: '🖼️', png: '🖼️', gif: '🖼️',
-        mp3: '🎵', wav: '🎵', mp4: '🎬', avi: '🎬',
-        zip: '📦', rar: '📦', '7z': '📦',
-        js: '💻', py: '🐍', html: '🌐', css: '🎨'
-    };
-    return icons[ext] || '📁';
-}
-
-// 格式化文件大小
-function formatSize(bytes) {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-// 格式化时间戳
-function formatTimestamp(timestamp) {
-    if (!timestamp) return '永久有效';
-    const date = new Date(timestamp * 1000);
-    return date.toLocaleString('zh-CN', {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit'
-    });
-}
-
-// 格式化剩余时间
-function formatRemainingTime(expiresAt) {
-    if (!expiresAt) return '永久';
-    const remaining = expiresAt - (Date.now() / 1000);
-    if (remaining <= 0) return '已过期';
-    
-    const hours = Math.floor(remaining / 3600);
-    const minutes = Math.floor((remaining % 3600) / 60);
-    
-    if (hours > 24) {
-        const days = Math.floor(hours / 24);
-        return `${days} 天 ${hours % 24} 小时`;
-    } else if (hours > 0) {
-        return `${hours} 小时 ${minutes} 分钟`;
-    } else {
-        return `${minutes} 分钟`;
-    }
-}
-
 // 打开分享设置弹窗
 function openShareModal(fileId, fileName) {
     currentShareFileId = fileId;
@@ -459,12 +398,13 @@ async function confirmCreateShare() {
 
 // 显示分享成功弹窗
 function showShareSuccessModal(result) {
-    currentShareLink = `${window.location.origin}/share.html#${result.share_id}`;
-    
+    const share = normalizeShare(result);
+    currentShareLink = `${window.location.origin}/share.html#${share.share_id}`;
+
     document.getElementById('shareLinkInput').value = currentShareLink;
-    document.getElementById('shareInfoName').textContent = result.filename;
-    document.getElementById('shareInfoExpire').textContent = formatTimestamp(result.expires_at);
-    document.getElementById('shareInfoDownloads').textContent = result.max_downloads ? `${result.max_downloads} 次` : '无限制';
+    document.getElementById('shareInfoName').textContent = share.filename;
+    document.getElementById('shareInfoExpire').textContent = formatTimestamp(share.expires_at);
+    document.getElementById('shareInfoDownloads').textContent = share.max_downloads ? `${share.max_downloads} 次` : '无限制';
     document.getElementById('copyBtnText').textContent = '复制';
     
     const copyBtn = document.querySelector('.copy-btn');
@@ -526,7 +466,7 @@ async function loadMyShares() {
             }
         });
         
-        const shares = await response.json();
+        const shares = (await response.json()).map(normalizeShare);
         
         if (shares.length === 0) {
             list.innerHTML = '<p class="empty-msg">暂无分享链接</p>';

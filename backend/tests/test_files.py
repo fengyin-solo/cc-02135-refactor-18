@@ -325,3 +325,79 @@ def test_download_by_share_no_auth_needed(client, auth_token):
     download_resp = client.get(f'/api/share/{share_id}/download')
     assert download_resp.status_code == 200
     assert download_resp.data == b'public content'
+
+
+def test_list_files_unified_shape(client):
+    """测试文件列表返回统一整形结构（不泄漏内部路径）"""
+    data = {'file': (io.BytesIO(b'shape content'), 'shape.txt')}
+    client.post('/api/upload', data=data, content_type='multipart/form-data')
+
+    response = client.get('/api/files')
+    assert response.status_code == 200
+    files = response.get_json()
+    assert len(files) >= 1
+    file_item = next(f for f in files if f['name'] == 'shape.txt')
+    assert set(file_item.keys()) == {'id', 'name', 'size', 'uploaded_at'}
+    assert file_item['size'] == len(b'shape content')
+
+
+def test_share_shape_consistent_across_entries(client, auth_token):
+    """测试创建回显、分享详情、分享列表返回同一结构"""
+    data = {'file': (io.BytesIO(b'consistent content'), 'test_consistent.txt')}
+    upload_resp = client.post('/api/upload', data=data, content_type='multipart/form-data')
+    file_id = upload_resp.get_json()['file_id']
+
+    create_resp = client.post(
+        '/api/share',
+        json={'file_id': file_id, 'expire_hours': 24, 'max_downloads': 5},
+        headers={'Authorization': f'Bearer {auth_token}'}
+    )
+    created = create_resp.get_json()
+    share_id = created['share_id']
+
+    detail = client.get(f'/api/share/{share_id}').get_json()
+    shares = client.get(
+        '/api/shares',
+        headers={'Authorization': f'Bearer {auth_token}'}
+    ).get_json()
+    listed = next(s for s in shares if s['share_id'] == share_id)
+
+    # 创建回显仅多出 success 标记，其余字段与详情/列表一致
+    assert set(created.keys()) == set(detail.keys()) | {'success'}
+    assert set(detail.keys()) == set(listed.keys())
+    for key in ('filename', 'filesize', 'created_by', 'expires_at',
+                'max_downloads', 'download_count', 'created_at', 'is_valid'):
+        assert created[key] == detail[key] == listed[key]
+
+
+def test_share_with_missing_fields_still_shaped(client, auth_token, db_conn):
+    """测试缺字段的旧分享记录仍能正常整形与展示"""
+    data = {'file': (io.BytesIO(b'legacy content'), 'legacy.txt')}
+    upload_resp = client.post('/api/upload', data=data, content_type='multipart/form-data')
+    file_id = upload_resp.get_json()['file_id']
+
+    # 模拟旧数据：有效期、下载上限、下载次数均缺失
+    cursor = db_conn.cursor()
+    cursor.execute(
+        'INSERT INTO share_links (id, file_id, created_by, expires_at, max_downloads, download_count) '
+        'VALUES (?, ?, ?, NULL, NULL, NULL)',
+        ('legacyshare1', file_id, 'admin')
+    )
+    db_conn.commit()
+
+    detail_resp = client.get('/api/share/legacyshare1')
+    assert detail_resp.status_code == 200
+    detail = detail_resp.get_json()
+    assert detail['filename'] == 'legacy.txt'
+    assert detail['expires_at'] is None
+    assert detail['max_downloads'] is None
+    assert detail['download_count'] == 0
+    assert detail['is_valid'] is True
+
+    list_resp = client.get(
+        '/api/shares',
+        headers={'Authorization': f'Bearer {auth_token}'}
+    )
+    listed = next(s for s in list_resp.get_json() if s['share_id'] == 'legacyshare1')
+    assert listed['download_count'] == 0
+    assert listed['is_valid'] is True

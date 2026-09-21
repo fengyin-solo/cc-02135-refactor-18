@@ -9,6 +9,12 @@ from werkzeug.utils import secure_filename
 from routes import files_bp
 from database import get_db
 from auth import verify_token, get_username_from_token, login_required
+from serializers import (
+    SHARE_WITH_FILE_QUERY,
+    shape_file,
+    shape_share,
+    check_share_validity,
+)
 from config import UPLOAD_FOLDER, MAX_FILE_SIZE, BLOCKED_EXTENSIONS, SHARE_LINK_EXPIRE_HOURS, SHARE_LINK_MAX_DOWNLOADS
 
 logger = logging.getLogger(__name__)
@@ -72,8 +78,8 @@ def upload_file():
 def list_files():
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT id, name, path, size FROM files')
-    files = [dict(row) for row in cursor.fetchall()]
+    cursor.execute('SELECT id, name, size, uploaded_at FROM files')
+    files = [shape_file(row) for row in cursor.fetchall()]
     conn.close()
     return jsonify(files)
 
@@ -118,30 +124,10 @@ def get_share_link_info(share_id):
     """获取分享链接信息，包含文件信息和有效性检查"""
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT s.id, s.file_id, s.created_by, s.expires_at, s.max_downloads, s.download_count, s.created_at,
-               f.name as filename, f.size as filesize
-        FROM share_links s
-        JOIN files f ON s.file_id = f.id
-        WHERE s.id = ?
-    ''', (share_id,))
+    cursor.execute(SHARE_WITH_FILE_QUERY + ' WHERE s.id = ?', (share_id,))
     share = cursor.fetchone()
     conn.close()
     return share
-
-
-def is_share_valid(share):
-    """检查分享链接是否有效"""
-    if not share:
-        return False, '分享链接不存在'
-
-    if share['expires_at'] is not None and share['expires_at'] < time.time():
-        return False, '分享链接已过期'
-
-    if share['max_downloads'] is not None and share['download_count'] >= share['max_downloads']:
-        return False, '分享链接下载次数已用完'
-
-    return True, None
 
 
 def increment_download_count(share_id):
@@ -220,45 +206,28 @@ def create_share():
 
     logger.info(f"分享链接创建成功: 文件 {file_info['name']}, 分享ID {share_id}, 创建者 {username}")
 
-    return jsonify({
-        'success': True,
-        'share_id': share_id,
-        'expires_at': expires_at,
-        'max_downloads': max_downloads,
-        'filename': file_info['name']
-    })
+    # 创建成功后返回与其它入口一致的整形结果
+    result = shape_share(get_share_link_info(share_id))
+    result['success'] = True
+    return jsonify(result)
 
 
 @files_bp.route('/api/share/<share_id>', methods=['GET'])
 def get_share(share_id):
     """获取分享链接信息（公开访问）"""
     share = get_share_link_info(share_id)
-    valid, error_msg = is_share_valid(share)
 
     if not share:
         return jsonify({'error': '分享链接不存在'}), 404
 
-    share_data = {
-        'share_id': share['id'],
-        'filename': share['filename'],
-        'filesize': share['filesize'],
-        'created_by': share['created_by'],
-        'expires_at': share['expires_at'],
-        'max_downloads': share['max_downloads'],
-        'download_count': share['download_count'],
-        'created_at': share['created_at'],
-        'is_valid': valid,
-        'error_msg': error_msg
-    }
-
-    return jsonify(share_data)
+    return jsonify(shape_share(share))
 
 
 @files_bp.route('/api/share/<share_id>/download', methods=['GET'])
 def download_by_share(share_id):
     """通过分享链接下载文件（公开访问）"""
     share = get_share_link_info(share_id)
-    valid, error_msg = is_share_valid(share)
+    valid, error_msg = check_share_validity(share)
 
     if not valid:
         return jsonify({'error': error_msg}), 404
@@ -293,34 +262,14 @@ def list_shares():
 
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT s.id, s.file_id, s.created_by, s.expires_at, s.max_downloads, s.download_count, s.created_at,
-               f.name as filename, f.size as filesize
-        FROM share_links s
-        JOIN files f ON s.file_id = f.id
+    cursor.execute(SHARE_WITH_FILE_QUERY + '''
         WHERE s.created_by = ?
         ORDER BY s.created_at DESC
     ''', (username,))
     shares = cursor.fetchall()
     conn.close()
 
-    result = []
-    for share in shares:
-        valid, error_msg = is_share_valid(share)
-        result.append({
-            'share_id': share['id'],
-            'file_id': share['file_id'],
-            'filename': share['filename'],
-            'filesize': share['filesize'],
-            'expires_at': share['expires_at'],
-            'max_downloads': share['max_downloads'],
-            'download_count': share['download_count'],
-            'created_at': share['created_at'],
-            'is_valid': valid,
-            'error_msg': error_msg
-        })
-
-    return jsonify(result)
+    return jsonify([shape_share(share) for share in shares])
 
 
 @files_bp.route('/api/share/<share_id>', methods=['DELETE'])
